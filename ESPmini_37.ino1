@@ -1,0 +1,1140 @@
+//Комерческое использование запрещено!
+//Распространение и публикация на других ресурсах только с согласия автора.
+//Автор Бубнов Евгений 29.01.2019г
+
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <user_interface.h>
+#include "AudioFileSourceICYStream.h"//ESP8266Audio-master_mod_espmini.zip (прилагается к проекту)
+#include "AudioFileSourceBuffer.h" //ESP8266Audio-master_mod_espmini.zip (прилагается к проекту)
+#include "AudioGeneratorMP3.h" //ESP8266Audio-master_mod_espmini.zip (прилагается к проекту)
+#include "AudioOutputI2SNoDAC.h" //ESP8266Audio-master_mod_espmini.zip (прилагается к проекту)
+//для работы esp8266Audio потребуется библиотека https://github.com/Gianbacchio/ESP8266_Spiram
+#include <ESP8266WebServer.h>
+#include <WiFiClient.h>
+#include <FS.h>
+#include <ArduinoJson.h> //https://github.com/bblanchon/ArduinoJson
+#include <IRremoteESP8266.h>
+#include <IRrecv.h>
+#include <DNSServer.h>
+#include <Wire.h>  
+#include "SSD1306Wire.h" // библиотека ESP8266_and_ESP32_Oled_Driver_for_SSD1306_mod_espmini.zip (прилагается к проекту)
+
+#include "html.h" //Страничка конфигурации (прилагается к проекту)
+#include "logo.h"
+
+#define Debug Serial
+
+int ver=37;
+
+const byte DNS_PORT = 53;
+IPAddress apIP(192, 168, 1, 1);
+DNSServer dnsServer;
+
+SSD1306Wire  display(0x3c, 14, 4);
+String status_string, id3;
+
+const uint16_t kRecvPin = 5;//назначаем порт под ir приемник
+int ch_up = 13; //назначаем кнопочку переключения каналов+
+int ch_dwn = 0; //назначаем кнопочку переключения каналов-
+//int vol_up = 16; //назначаем кнопочку громкость+
+//int vol_dwn = 0; //назначаем кнопочку громкость-
+
+int mute =12;
+int vol; //уровень 
+bool temp_write; //флаг сохранить уровень
+
+int status_red =4; //красный светодиод
+int status_green=14; //зеленый светодиод
+
+int ch;
+bool stream_ok; //статус потока
+bool apstart=0; //статус режима работы wifi
+bool power_ok=1;
+
+String ssid, wifipsw; //ssid и  wifi pasword
+String jsonConfig = "{}"; //json
+String url0, url1, url2, url3, url4, url5, url6, url7, url8, url9; //url потоков
+unsigned int ir_power, ir_mode, ir_ch_up, ir_ch_dwn, ir_vol_up, ir_vol_dwn, rxir, ir_ch_0, ir_ch_1, ir_ch_2, ir_ch_3, ir_ch_4, ir_ch_5, ir_ch_6, ir_ch_7, ir_ch_8, ir_ch_9; 
+String url_tmp;
+String state_uart;
+String indicator;
+String radio_name, radio_br;
+int  posstart, posstop;
+bool revers;
+
+int lastms = 0, refresh=0; //засечка времени (служебная)
+int timer_read ;
+
+IRrecv irrecv(kRecvPin);
+decode_results results;
+
+ESP8266WebServer server(80); //конфиг веб сервера
+
+AudioGeneratorMP3 *mp3; 
+AudioFileSourceICYStream *file;
+AudioFileSourceBuffer *buff;
+AudioOutputI2SNoDAC *out;
+
+void ap_start()//подпрограмма запуска точки доступа для конфигурирования
+{
+
+  Debug.println(" ");
+  Debug.println("Start ap");
+  WiFi.mode(WIFI_AP);//режим работы точка доступа
+  Debug.println("Configuring access point...");
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP("ESPmini");
+  IPAddress myIP = WiFi.softAPIP();
+  Debug.print("SSID: ESPmini. AP IP address: ");
+  Debug.println(myIP);
+  dnsServer.start(DNS_PORT, "*", apIP);
+  if (indicator=="Led") digitalWrite(status_red, HIGH), digitalWrite(status_green, HIGH);//зажигаем зеленый
+  if (indicator=="Display"){
+    display.clear();
+    display.setTextAlignment(TEXT_ALIGN_CENTER);
+    display.setFont(ArialMT_Plain_24);
+    display.drawString(64, 0, "AP MODE");
+    display.setFont(ArialMT_Plain_16);
+    display.drawString(64, 24, "SSID: ESPmini");
+    display.drawString(64, 40, "IP: 192.168.1.1");
+    display.display();
+  }  
+  webinit();
+}
+
+
+
+void setup()
+{
+  while(1) yield();
+  system_update_cpu_freq(SYS_CPU_160MHZ); //nтактовая 160Мгц
+  
+  SPIFFS.begin(); //запускаем spiffs
+  
+  loadConfig(); //загружаем сохранненую конфигурацию
+
+  if (indicator=="Display"){
+      display.init();
+      display.clear();
+  
+  display.drawXbm(0, 0, logo_width, logo_height, logo_bits);  //рисуем лого
+  display.display();
+  delay(2000);
+
+      display.clear();
+      display.setTextAlignment(TEXT_ALIGN_CENTER);
+      display.setFont(ArialMT_Plain_24);
+      display.drawString(64, 9, "ESPmini");
+      display.setFont(ArialMT_Plain_16);
+      display.drawString(64, 35, "ver "+String(ver));
+      
+      display.display();
+      delay(1000);
+      display.clear();
+  }
+
+  load_status("Init hardware", 0);
+ 
+  pinMode(ch_up, INPUT_PULLUP); //конфигурируем вход 
+  pinMode(ch_dwn, INPUT_PULLUP);//конфигурируем вход 
+  //pinMode(vol_up, INPUT_PULLUP);//конфигурируем вход 
+  //pinMode(vol_dwn, INPUT_PULLUP);//конфигурируем вход 
+ 
+  if (indicator=="Led"){
+     pinMode(status_red, OUTPUT); //выход
+     pinMode(status_green, OUTPUT);//выход
+  }
+ 
+  pinMode(mute, OUTPUT);//выход
+  digitalWrite(mute, LOW);
+
+  irrecv.enableIRIn();  //запускаем ir
+  ok(0);
+   
+  load_status("Load settings", 10);
+  loadtemp();
+  ok(10);
+
+  load_status("Config UART", 20);
+  if (state_uart=="On"){//если включен лог выводим данные в uart
+    Debug.begin(74880); //конфиг uart
+    Debug.setDebugOutput(true); 
+  }
+  ok(20);
+  
+  Debug.println("");
+  Debug.println("Start ESP-12");
+  Debug.println("Set indicator: "+indicator);
+       
+  if (!digitalRead(ch_up) || apstart==1){ //при включении нажали поток + или стоит флаг запуска точки- запускается точка доступа для конфигурации
+   
+    load_status("Start AP mode", 30);
+    
+    apstart=0;
+    savetemp();
+    delay(1000);    
+    ok(30);
+    ap_start();
+    
+  }else{
+  
+    load_status("Connect to "+ssid, 30);
+    Debug.println("Connecting to "+ssid);
+    WiFi.disconnect();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_STA);// режим клиента
+    //WiFi.setPhyMode(WIFI_PHY_MODE_11B);//включаем принудительно режим B
+    WiFi.begin(ssid.c_str(), wifipsw.c_str());
+ 
+    byte tries = 10;
+    while (--tries && WiFi.status() != WL_CONNECTED) //10 раз пытаемся подключиться
+    {
+      if (indicator=="Led") digitalWrite(status_green, !digitalRead(status_green));
+      Debug.print(".");
+      delay(3000);
+    }
+    
+    if (WiFi.status() != WL_CONNECTED){
+      load_status("No connecting...", 40);
+      delay(2000);
+      ap_start(); //если не получилось подключиться запускаем точку доступа и веб сервер
+    }
+    
+    Debug.println("");
+    WiFi.printDiag(Debug);
+            
+    if (apstart==0){
+      
+      ok(30);
+      load_status("Start radio", 40);
+      delay(1000);
+      
+      out = new AudioOutputI2SNoDAC();//назначаем вывод звука через шим
+      out->SetGain(((float)vol)/100.0);//устанавливаем уровень звука
+      sel_ch();//запускаем воспроизведение сохраненного потока и проверяем статус
+    }
+  //ok(40);
+  }
+
+}
+
+void ok(int st){
+ if (indicator=="Display"){
+    display.setTextAlignment(TEXT_ALIGN_RIGHT); 
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(120, st, "OK");
+    display.display();
+ }
+}
+
+void load_status(String info, int st){
+ if (indicator=="Display"){
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(0, st, info);
+    display.display();
+ }
+}
+
+void loop()
+{
+
+if (irrecv.decode(&results)) {
+  if (results.value != 18446744073709551615) rxir = (unsigned int)((results.value & 0x000FFFFF));//если "пустой пакет" то пропускаем, в противном случае пишем в rxir
+    //Debug.println(rxir);
+    
+     if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_power && apstart==0) {//останавливаем/запускаем воспроизведение 
+        if (power_ok==1){
+        power_ok=0;
+        stream_ok=0;
+        StopPlaying();
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+     }else{
+        power_ok=1;
+        stream_ok=play("");  
+      }
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_mode && apstart==0) {//нажали кнопку пульта переход в режим точки доступа
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        apstart=1;
+        savetemp();
+        ESP.restart();
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_mode && apstart==1) {//нажали кнопку пульта выход из режима точки доступа
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        apstart=0;
+        savetemp();
+        ESP.restart();
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_0 && apstart==0) {//нажали кнопку пульта 0 
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=0;//
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_1 && apstart==0) {//нажали кнопку пульта 1 
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=1;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_2 && apstart==0) {//нажали кнопку пульта 2 
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=2;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_3 && apstart==0) {//нажали кнопку пульта 3
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=3;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_4 && apstart==0) {//нажали кнопку пульта 4 
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=4;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_5 && apstart==0) {//нажали кнопку пульта 5
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=5;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_6 && apstart==0) {//нажали кнопку пульта 6
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=6;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_7 && apstart==0) {//нажали кнопку пульта 7
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=7;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_8 && apstart==0) {//нажали кнопку пульта 8
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=8;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if ((unsigned int)((results.value & 0x000FFFFF)) ==ir_ch_9 && apstart==0) {//нажали кнопку пульта 9
+        if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+        ch=9;
+        temp_write=1;//ставим флаг что кнопку нажимали
+        sel_ch();//отправляемся запускать поток
+    }
+    if (rxir ==ir_ch_up && apstart==0) {//следующий канал
+      if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+      ch++;
+      sel_ch();//отправляемся запускать поток
+    temp_write=1;//ставим флаг что кнопку нажимали
+    }
+    if (rxir ==ir_ch_dwn && apstart==0) {//предыдущий канал
+      if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);   
+      ch--;
+      sel_ch();//отправляемся запускать поток
+    temp_write=1;//ставим флаг что кнопку нажимали
+    }
+    if (rxir == ir_vol_dwn && apstart==0){//убавить громкость    
+      vol-=10;
+      if (vol<0) vol=0;
+      Debug.println(vol);
+      out->SetGain(((float)vol)/100.0);//устанавливаем усиление
+    temp_write=1;//ставим флаг что кнопку нажимали
+    }
+    if (rxir == ir_vol_up && apstart==0){//добавить громкость    
+      vol+=10;
+      if (vol>110) vol=110;
+      Debug.println(vol);
+      out->SetGain(((float)vol)/100.0);//устанавливаем усиление
+    temp_write=1;//ставим флаг что кнопку нажимали
+    }
+
+    irrecv.resume();  //принимаем следующий пакет ir
+  }
+
+if (apstart==1) {//если запущена точка доступа то крутим веб сервер и dns
+  
+  dnsServer.processNextRequest();
+  server.handleClient();
+  
+}else{//если точка доступа не работает тогда работает радио
+
+if (millis()-timer_read > 100) {//раз в 100 мс
+    timer_read = millis();
+    int adc_val=analogRead(A0);
+    if (stream_ok==1) mp3->loop();   
+    //Debug.println(adc_val);   
+  
+  if (adc_val>1000){//нажали кнопку канал 0
+    if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+    Debug.println(adc_val);
+    ch=0;
+    sel_ch();//отправляемся запускать поток
+  }
+  if (adc_val>790 && adc_val<850){//нажали кнопку канал 1
+    if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);//зеленый светодиод выключили 
+    Debug.println(adc_val);
+    ch=1;
+    sel_ch();//отправляемся запускать поток
+  }
+  if (adc_val>640 && adc_val<700){//нажали кнопку канал 2
+    if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);//зеленый светодиод выключили 
+    Debug.println(adc_val);
+    ch=2;
+    sel_ch();//отправляемся запускать поток
+  }
+  if (adc_val>520 && adc_val<580){//нажали кнопку канал 3
+    if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);//зеленый светодиод выключили 
+    Debug.println(adc_val);
+    ch=3;
+    sel_ch();//отправляемся запускать поток
+  }
+  if (adc_val>450 && adc_val<510){//нажали кнопку канал 4
+    if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);//зеленый светодиод выключили 
+    Debug.println(adc_val);
+    ch=4;
+    sel_ch();//отправляемся запускать поток
+  }
+}
+
+  if (!digitalRead(ch_up)){//нажали кнопку канал +
+    if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);//зеленый светодиод выключили 
+    delay(100);
+    ch++;
+    sel_ch();//отправляемся запускать поток
+  temp_write=1;//ставим флаг что кнопку нажимали
+  }
+  
+  if (!digitalRead(ch_dwn)){
+    if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, LOW);
+    delay(100);
+    ch--;
+    sel_ch();
+  temp_write=1;//ставим флаг что кнопку нажимали
+  }
+  
+ // if (!digitalRead(vol_up)){//нажали кнопку громкость +
+ //   for (int i=0; i <= 20; i++){//небольшая задержка 3мс 
+ //    if (stream_ok==1) mp3->loop();//если поток запущен то работает "подкачка"
+ //    delay(1);
+ //   }
+  //  vol++;
+ //   if (vol>110) vol=110;
+ //   Debug.println(vol);
+ //   out->SetGain(((float)vol)/100.0);//устанавливаем уровень
+ //   temp_write=1;//ставим флаг что кнопку нажимали
+ // }
+
+ // if (!digitalRead(vol_dwn)){
+ //   for (int i=0; i <= 20; i++){
+ //    if (stream_ok==1) mp3->loop();
+ //    delay(1);
+ //   }
+ //   vol--;
+ //   if (vol<0) vol=0;
+ //   Debug.println(vol);
+ //   out->SetGain(((float)vol)/100.0);
+ //   temp_write=1;
+ // }
+
+  if (stream_ok==1){//если поток запустился то
+    status_string="PLAY";
+    if (mp3->isRunning()) {//проверяем воспроизведение потока
+        if (millis()-lastms > 3000) {//раз в 3 сек
+          lastms = millis();
+          if (temp_write==1) temp_write=0, Debug.println("Save"), savetemp();//проверяем изменялась ли значения и сохраняем 
+          Debug.printf("Running for %d ms. Heap: %d b\n", lastms, ESP.getFreeHeap());//отображаем воспроизводится ли поток
+          Debug.flush();
+        }
+    if (!mp3->loop()) mp3->stop();//если "подкачка встала" останваливаем воспроизведение 
+    digitalWrite(mute, HIGH);
+    }else{
+       stream_ok=play("");//если воспроизведение потока останавилось, перезапускаем
+    }
+  
+  }else{
+    status_string="STOP";
+  }
+
+       // if (millis()-refresh > 300) {//
+        //  refresh = millis();
+          oled();
+       // }
+if (stream_ok==1) mp3->loop();
+}
+
+ 
+}
+
+
+void oled() {
+  if (indicator=="Display"){
+    display.clear();
+
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.setFont(Arial_10);
+    display.drawString(0, 0, "S:"+String(WiFi.RSSI())+"dBm");
+    display.drawString(51, 0, "Br:"+radio_br);
+    display.drawString(87, 0, "Vol: "+String(vol));
+   
+    display.setTextAlignment(TEXT_ALIGN_CENTER);
+    display.setFont(Arial_14);
+    display.drawString(64, 11, "CH:"+String(ch)+" "+status_string);
+
+    display.setTextAlignment(TEXT_ALIGN_CENTER);
+    //display.setFont(Font5x7);
+    display.setFont(Arial_10);
+    display.drawString(64, 26, radio_name);  
+    
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    //display.setFont(Font5x7);
+    display.setFont(Arial_10);
+    display.drawStringMaxWidth(0, 37, 128,id3);
+    
+    display.display();
+  }    
+}
+
+void MDCallback(void *cbData, const char *type, bool isUnicode, const char *string)
+{
+  const char *ptr = reinterpret_cast<const char *>(cbData);
+  (void) isUnicode; 
+  char s1[32], s2[64];
+  strncpy_P(s1, type, sizeof(s1));
+  s1[sizeof(s1)-1]=0;
+  strncpy_P(s2, string, sizeof(s2));
+  s2[sizeof(s2)-1]=0;
+  Serial.printf("METADATA(%s) '%s' = '%s'\n", ptr, s1, s2);
+  Serial.flush();
+  if (String(s1)=="StreamTitle"){
+    id3=s2;
+  }
+}
+
+// Called when there's a warning or error (like a buffer underflow or decode hiccup)
+void StatusCallback(void *cbData, int code, const char *string)
+{
+  //const char *ptr = reinterpret_cast<const char *>(cbData);
+  // Note that the string may be in PROGMEM, so copy it to RAM for printf
+  //char s1[64];
+  //strncpy_P(s1, string, sizeof(s1));
+  //s1[sizeof(s1)-1]=0;
+  //Serial.printf("STATUS(%s) '%d' = '%s'\n", ptr, code, s1);
+  //Serial.flush();
+  if (code==257 || code==565){
+    digitalWrite(mute, LOW);
+  }
+}
+
+bool play(String stream)//подпрограмма запуска потока
+{
+status_string="OPEN";
+oled();
+
+if (stream==""){
+  Debug.println("restart stream");   
+}else{
+  url_tmp=stream;
+  //save_url=url_tmp;
+}
+
+StopPlaying();//останавливаем воспроизведение
+
+file = new AudioFileSourceICYStream();
+//file = new AudioFileSourceHTTPStream();
+
+file->format_file("audio/mpeg");//проверка заголовка потока, пропускаем только mpeg потоки
+
+//file->read_name();
+
+if (file->open(url_tmp.c_str())){//загружаем поток, если все ОК то выполняем
+  
+  if (indicator=="Display") file->RegisterMetadataCB(MDCallback, (void*)"ICY");
+  Debug.println("Open Stream "+url_tmp+" OK");   
+  Debug.println("Radio name: "+file->read_name());
+  Debug.println("Radio bitrate: "+file->read_br());
+  radio_name=file->read_name();
+  radio_br=file->read_br();
+  
+  //if (indicator=="Display") buff = new AudioFileSourceBuffer(file, 1024);//конфигурируем буфер
+  if (indicator=="Led"){
+    buff = new AudioFileSourceBuffer(file, 2048);//конфигурируем буфер
+    mp3 = new AudioGeneratorMP3();//назначаем декодер потока
+    mp3->begin(buff, out);//запускаем поток
+  }
+
+  if (indicator=="Display"){
+    mp3 = new AudioGeneratorMP3();//назначаем декодер потока
+    //mp3->RegisterStatusCB(StatusCallback, (void*)"mp3");
+    buff = new AudioFileSourceBuffer(file, 2048);//конфигурируем буфер
+    //buff->RegisterStatusCB(StatusCallback, (void*)"buffer");
+    mp3->begin(buff, out);//запускаем поток
+  }
+   
+  if (indicator=="Led") digitalWrite(status_green, HIGH), digitalWrite(status_red, LOW);//красный тушим
+      
+  digitalWrite(mute, HIGH); 
+
+  return true;//возвращаем 1
+}else{//если не ОК 
+  Debug.println("Open Stream "+url_tmp+" ERR");//пишем в терминал ошибку
+
+  if (indicator=="Led") digitalWrite(status_green, LOW), digitalWrite(status_red, HIGH);//красный зажигаем
+
+  status_string="ERROR";
+  oled();
+  delay(500);
+      
+  digitalWrite(mute, LOW);
+  return false;//возвращаем 0
+}
+}
+
+void StopPlaying()//подпрограмма остановки потока 
+{
+
+digitalWrite(mute, LOW);
+
+id3="";
+radio_br="";
+radio_name="";
+
+if (mp3) 
+{
+  mp3->stop();
+  delete mp3;
+  mp3 = NULL;
+}
+if (buff) 
+{
+  buff->close();
+  delete buff;
+  buff = NULL;
+}
+if (file) 
+{
+  file->close();
+  delete file;
+  file = NULL;
+}
+}
+
+void sel_ch()//подпрограмма выбора потока 
+{
+if (ch==0) stream_ok=play(url0);
+if (ch==1) stream_ok=play(url1);
+if (ch==2) stream_ok=play(url2);
+if (ch==3) stream_ok=play(url3);
+if (ch==4) stream_ok=play(url4);
+if (ch==5) stream_ok=play(url5);
+if (ch==6) stream_ok=play(url6);
+if (ch==7) stream_ok=play(url7);
+if (ch==8) stream_ok=play(url8);
+if (ch==9) stream_ok=play(url9);
+if (ch>9) ch=0,  stream_ok=play(url0);
+if (ch<0) ch=9,  stream_ok=play(url9);  
+}
+
+void webinit(){//инициализация веб сервера
+  Debug.println("Start web");
+
+  server.onNotFound([]() {
+    server.send(200, "text/html", MAIN_page);
+  });
+
+  server.on("/freset", HTTP_GET, [](){//если вызвали форматируем SPIFFS и перезагружаемся
+    SPIFFS.format();
+    server.send(200,"text/html", "OK");
+    ESP.restart(); 
+    });
+  
+  server.on("/reboot", HTTP_GET, [](){//если вызвали перезагружаемся
+    server.send(200,"text/html", "OK");
+    apstart=0;
+    savetemp(); 
+    ESP.restart();
+  });
+  server.on("/update", HTTP_POST, [](){//если отправили файл, то загружаем и обновляемся
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", (Update.hasError())?"<center>FAIL Update<br> <a href=""/"" >Back</a></center>":"<center>Update firmware OK. Reboot... <br> <a href=""/"" >Back</a></center>");
+    if (Update.hasError() !=1){
+      delay(500);
+      ESP.restart();
+    }
+    },[](){
+      HTTPUpload& upload = server.upload();
+      if(upload.status == UPLOAD_FILE_START){
+        //Debug.setDebugOutput(true);
+        Debug.printf("Update: %s\n", upload.filename.c_str());
+        uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        if(!Update.begin(maxSketchSpace)){//start with max available size
+          Update.printError(Debug);
+        }
+      }else if(upload.status == UPLOAD_FILE_WRITE){
+        if(Update.write(upload.buf, upload.currentSize) != upload.currentSize){
+          Update.printError(Debug);
+        }
+      } else if(upload.status == UPLOAD_FILE_END){
+        if(Update.end(true)){ //true to set the size to the current progress
+          Debug.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+        }else{
+          Update.printError(Debug);
+        }
+        //Debug.setDebugOutput(false);
+      }
+      yield();
+  });
+
+  server.on("/json.conf", HTTP_GET, [](){//формируем текущую конфигурацию и выгружаем
+    String json="{";
+    json+="\"ver\":";
+    json+="\""+String(ver)+"\",";
+    json+="\"ssid\":";
+    json+="\""+ssid+"\",";
+    json+="\"wifipsw\":";
+    json+="\""+wifipsw+"\",";
+
+    json+="\"state_uart\":";
+    json+="\""+state_uart+"\",";
+
+        json+="\"indicator\":";
+    json+="\""+indicator+"\",";
+    
+    json+="\"url0\":";
+    json+="\""+url0+"\",";
+    json+="\"url1\":";
+    json+="\""+url1+"\",";
+    json+="\"url2\":";
+    json+="\""+url2+"\",";
+    json+="\"url3\":";
+    json+="\""+url3+"\",";
+    json+="\"url4\":";
+    json+="\""+url4+"\",";
+    json+="\"url5\":";
+    json+="\""+url5+"\",";
+    json+="\"url6\":";
+    json+="\""+url6+"\",";
+    json+="\"url7\":";
+    json+="\""+url7+"\",";
+    json+="\"url8\":";
+    json+="\""+url8+"\",";
+    json+="\"url9\":";
+    json+="\""+url9+"\",";
+
+    json+="\"power\":";
+    json+="\""+String(ir_power)+"\",";
+    json+="\"mode\":";
+    json+="\""+String(ir_mode)+"\",";
+    json+="\"ch_up\":";
+    json+="\""+String(ir_ch_up)+"\",";
+    json+="\"ch_dwn\":";
+    json+="\""+String(ir_ch_dwn)+"\",";
+    json+="\"vol_up\":";
+    json+="\""+String(ir_vol_up)+"\",";
+    json+="\"vol_dwn\":";
+    json+="\""+String(ir_vol_dwn)+"\",";
+
+    json+="\"ch_0\":";
+    json+="\""+String(ir_ch_0)+"\",";
+    json+="\"ch_1\":";
+    json+="\""+String(ir_ch_1)+"\",";
+    json+="\"ch_2\":";
+    json+="\""+String(ir_ch_2)+"\",";
+    json+="\"ch_3\":";
+    json+="\""+String(ir_ch_3)+"\",";
+    json+="\"ch_4\":";
+    json+="\""+String(ir_ch_4)+"\",";
+    json+="\"ch_5\":";
+    json+="\""+String(ir_ch_5)+"\",";
+    json+="\"ch_6\":";
+    json+="\""+String(ir_ch_6)+"\",";
+    json+="\"ch_7\":";
+    json+="\""+String(ir_ch_7)+"\",";
+    json+="\"ch_8\":";
+    json+="\""+String(ir_ch_8)+"\",";
+    json+="\"ch_9\":";
+    json+="\""+String(ir_ch_9)+"\"";
+    
+    json+="}";
+
+    server.send(200,"text/javascript",json);
+    json=String();  
+  });
+
+ server.on("/rc.conf", HTTP_GET, [](){
+
+  String json="{";
+  json+="\"rxir\":";
+  json+="\""+String(rxir)+"\"";
+  json+="}";
+
+  server.send(200,"text/javascript",json);
+  json=String();  
+ });
+
+server.on("/ir", HTTP_GET, [](){
+  ir_power = server.arg("power").toInt();
+  ir_mode = server.arg("mode").toInt();
+  ir_ch_up = server.arg("ch_up").toInt();
+  ir_ch_dwn = server.arg("ch_dwn").toInt();
+  ir_vol_up = server.arg("vol_up").toInt();
+  ir_vol_dwn = server.arg("vol_dwn").toInt();
+
+  ir_ch_0 = server.arg("ch_0").toInt();
+  ir_ch_1 = server.arg("ch_1").toInt();
+  ir_ch_2 = server.arg("ch_2").toInt();
+  ir_ch_3 = server.arg("ch_3").toInt();
+  ir_ch_4 = server.arg("ch_4").toInt();
+  ir_ch_5 = server.arg("ch_5").toInt();
+  ir_ch_6 = server.arg("ch_6").toInt();
+  ir_ch_7 = server.arg("ch_7").toInt();
+  ir_ch_8 = server.arg("ch_8").toInt();
+  ir_ch_9 = server.arg("ch_9").toInt();
+  
+  saveConfig();
+  server.send(200,"text/html", MAIN_page); 
+});
+
+server.on("/uart", HTTP_GET, [](){
+  state_uart = server.arg("state");
+  saveConfig();
+  server.send(200,"text/html", MAIN_page); 
+});
+
+server.on("/indicator", HTTP_GET, [](){
+  indicator = server.arg("state");
+  saveConfig();
+  server.send(200,"text/html", MAIN_page); 
+});
+
+//http://192.168.0.101/url0?url=http://dfsdfd
+  server.on("/url0", HTTP_GET, [](){//при помощи get загружаем url
+    url0 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url1", HTTP_GET, [](){
+    url1 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url2", HTTP_GET, [](){
+    url2 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url3", HTTP_GET, [](){
+    url3 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url4", HTTP_GET, [](){
+    url4 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url5", HTTP_GET, [](){
+    url5 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url6", HTTP_GET, [](){
+    url6 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url7", HTTP_GET, [](){
+    url7 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url8", HTTP_GET, [](){
+    url8 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+  server.on("/url9", HTTP_GET, [](){
+    url9 = server.arg("url");
+    saveConfig();
+    server.send(200,"text/html", MAIN_page); 
+  });
+
+  server.on("/set", set);//при помощи get загружаем ssid и psw
+  
+  server.begin();//запускаем веб сервер
+
+  apstart=1; //ставим флаг запущена точка доступа
+
+}
+
+//http://192.168.100.112/set?url0=hhtp://url
+void set() 
+{
+  ssid = server.arg("ssid");
+  wifipsw = server.arg("wifipsw");
+  saveConfig();
+  server.send(200,"text/html", MAIN_page);
+}
+
+bool loadConfig() // pагрузка данных сохраненных из файла
+{
+  File configFile = SPIFFS.open("/config.json", "r");// открываем файл для чтения
+  if (!configFile) {// если файл не найден сообщаем и пишем потоки по умолчанию
+    fail_save();
+    return false;
+  }
+  
+  size_t size = configFile.size();
+  
+  if (size > 1024) {// проверяем размер файла
+    Debug.println("Size error!");
+    return false;
+  }
+
+
+  jsonConfig = configFile.readString();// загружаем файл конфигурации 
+  DynamicJsonDocument root(1024);
+  deserializeJson(root, jsonConfig);  
+  ssid = root["ssid"].as<String>();
+  wifipsw = root["wifipsw"].as<String>();
+  
+  state_uart= root["state_uart"].as<String>();
+
+  indicator= root["indicator"].as<String>();
+
+  url0 = root["url0"].as<String>();
+  url1 = root["url1"].as<String>();
+  url2 = root["url2"].as<String>();
+  url3 = root["url3"].as<String>();
+  url4 = root["url4"].as<String>();
+  url5 = root["url5"].as<String>();
+  url6 = root["url6"].as<String>();
+  url7 = root["url7"].as<String>();
+  url8 = root["url8"].as<String>();
+  url9 = root["url9"].as<String>();
+
+  ir_power = root["power"];
+  ir_ch_up = root["ch_up"];
+  ir_ch_dwn = root["ch_dwn"];
+  ir_vol_up = root["vol_up"];
+  ir_vol_dwn = root["vol_dwn"];
+  ir_mode = root["mode"];
+  ir_ch_0 = root["ch_0"];
+  ir_ch_1 = root["ch_1"];
+  ir_ch_2 = root["ch_2"];
+  ir_ch_3 = root["ch_3"];
+  ir_ch_4 = root["ch_4"];
+  ir_ch_5 = root["ch_5"];
+  ir_ch_6 = root["ch_6"];
+  ir_ch_7 = root["ch_7"];
+  ir_ch_8 = root["ch_8"];
+  ir_ch_9 = root["ch_9"];
+
+  configFile.close();//закрываем файл
+
+  if (url0=="" && url1=="" && url2=="") fail_save();
+
+  return true;
+}
+
+bool saveConfig() // сохраняем онфигурацию в файл
+{
+  if (ssid=="") ssid="ssid";
+  if (wifipsw=="") wifipsw="none";
+  if (url0=="") url0="http://";
+  if (url1=="") url1="http://";
+  if (url2=="") url2="http://";
+  if (url3=="") url3="http://";
+  if (url4=="") url4="http://";
+  if (url5=="") url5="http://";
+  if (url6=="") url6="http://";
+  if (url7=="") url7="http://";
+  if (url8=="") url8="http://";
+  if (url9=="") url9="http://";
+
+  String json="{";
+  json+="\"ssid\":";
+  json+="\""+ssid+"\",";
+  json+="\"wifipsw\":";
+  json+="\""+wifipsw+"\",";
+
+  json+="\"state_uart\":";
+  json+="\""+state_uart+"\",";
+
+    json+="\"indicator\":";
+  json+="\""+indicator+"\",";
+
+  json+="\"url0\":";
+  json+="\""+url0+"\",";
+  json+="\"url1\":";
+  json+="\""+url1+"\",";
+  json+="\"url2\":";
+  json+="\""+url2+"\",";
+  json+="\"url3\":";
+  json+="\""+url3+"\",";
+  json+="\"url4\":";
+  json+="\""+url4+"\",";
+  json+="\"url5\":";
+  json+="\""+url5+"\",";
+  json+="\"url6\":";
+  json+="\""+url6+"\",";
+  json+="\"url7\":";
+  json+="\""+url7+"\",";
+  json+="\"url8\":";
+  json+="\""+url8+"\",";
+  json+="\"url9\":";
+  json+="\""+url9+"\",";
+
+  json+="\"power\":";
+  json+="\""+String(ir_power)+"\",";
+  json+="\"mode\":";
+  json+="\""+String(ir_mode)+"\",";
+  json+="\"ch_up\":";
+  json+="\""+String(ir_ch_up)+"\",";
+  json+="\"ch_dwn\":";
+  json+="\""+String(ir_ch_dwn)+"\",";
+  json+="\"vol_up\":";
+  json+="\""+String(ir_vol_up)+"\",";
+  json+="\"vol_dwn\":";
+  json+="\""+String(ir_vol_dwn)+"\",";
+  json+="\"ch_0\":";
+  json+="\""+String(ir_ch_0)+"\",";
+  json+="\"ch_1\":";
+  json+="\""+String(ir_ch_1)+"\",";
+  json+="\"ch_2\":";
+  json+="\""+String(ir_ch_2)+"\",";
+  json+="\"ch_3\":";
+  json+="\""+String(ir_ch_3)+"\",";
+  json+="\"ch_4\":";
+  json+="\""+String(ir_ch_4)+"\",";
+  json+="\"ch_5\":";
+  json+="\""+String(ir_ch_5)+"\",";
+  json+="\"ch_6\":";
+  json+="\""+String(ir_ch_6)+"\",";
+  json+="\"ch_7\":";
+  json+="\""+String(ir_ch_7)+"\",";
+  json+="\"ch_8\":";
+  json+="\""+String(ir_ch_8)+"\",";
+  json+="\"ch_9\":";
+  json+="\""+String(ir_ch_9)+"\"";
+  
+  json+="}";
+
+  //Debug.println(json);
+ 
+  File configFile = SPIFFS.open("/config.json", "w");// открываем файл для записи
+  if (!configFile) {
+    Debug.println("Error open config file for write!");
+    return false;
+  }
+
+  configFile.print(json);// записываем строку json в файл
+
+  configFile.close();//закрываем файл
+  
+  json=String();  
+  
+  return true;
+  }
+
+bool loadtemp() // pагрузка данных сохраненных из файла
+{
+  File configFile = SPIFFS.open("/temp.json", "r");// открываем файл для чтения
+  if (!configFile) {// если файл не найден сообщаем и пишем потоки по умолчанию
+    vol=100;
+    ch=0;
+    savetemp();
+    return false;
+  }
+  
+  size_t size = configFile.size();
+  
+  if (size > 1024) {// проверяем размер файла
+    Debug.println("Size error temp!");
+    return false;
+  }
+
+
+  jsonConfig = configFile.readString();// загружаем файл конфигурации 
+  DynamicJsonDocument root(1024);
+  deserializeJson(root, jsonConfig);
+
+  ch = root["ch"];
+  vol = root["vol"]; 
+  apstart = root["ap"];  
+  configFile.close();//закрываем файл
+
+  return true;
+}
+
+  bool savetemp() // сохраняем онфигурацию в файл
+{
+   String json="{";
+  json+="\"ch\":";
+  json+="\""+String(ch)+"\",";
+  json+="\"vol\":";
+  json+="\""+String(vol)+"\",";
+  json+="\"ap\":";
+  json+="\""+String(apstart)+"\"";
+    
+  json+="}";
+
+  Debug.println(json);
+ 
+  File configFile = SPIFFS.open("/temp.json", "w");// открываем файл для записи
+  if (!configFile) {
+    Debug.println("Error open temp file for write!");
+    return false;
+  }
+
+  if (stream_ok==1) mp3->loop();//процесс длительный поэтому вызываем "подкачку"
+
+  configFile.print(json);// записываем строку json в файл
+  
+  if (stream_ok==1) mp3->loop();
+
+  configFile.close();//закрываем файл
+  
+  json=String();  
+  
+  return true;
+  }
+
+  void fail_save(){//если вызвали загружаем конфиг по умолчанию
+    Debug.println("Fail save settings write!");
+    ssid="ssid";
+    wifipsw="none";
+    state_uart="On";
+    indicator="Led";
+    url0="http://ep128.hostingradio.ru:8030/ep128";
+    url1="http://philae.shoutca.st:8446/stream/1/"; 
+    url2="http://online1.gkvr.ru:8000/radiola_eka_128.mp3"; 
+    url3="http://bfm.hostingradio.ru:8004/fm"; 
+    ir_power=1032765;
+    ir_mode=1020015;
+    ir_ch_up=1040925;
+    ir_ch_dwn=1024605;
+    ir_vol_up=1026135;
+    ir_vol_dwn=1040415;
+    ir_ch_0 = 1009815;
+    ir_ch_1 = 995535;
+    ir_ch_2 = 989415;
+    ir_ch_3 = 1014405;
+    ir_ch_4 = 987375;
+    ir_ch_5 = 997575;
+    ir_ch_6 = 1006245;
+    ir_ch_7 = 1000125;
+    ir_ch_8 = 1002165;
+    ir_ch_9 = 1004205;
+    saveConfig();//создаем файл записав в него даные по умолчанию
+    vol=100;
+    ch=0;
+    apstart=0;
+    savetemp();
+    //return false;
+  }

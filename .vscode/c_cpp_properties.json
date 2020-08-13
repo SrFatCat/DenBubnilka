@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "C:\\Users\\Alex\\AppData\\Local\\Arduino15\\packages\\esp8266\\tools\\**",
+                "C:\\Users\\Alex\\Documents\\Arduino\\libraries\\myIncludes\\**",
+                "C:\\Users\\Alex\\Documents\\Arduino\\libraries\\ESP8266Audio-master\\**",
+                "C:\\Users\\Alex\\Documents\\Arduino\\libraries\\ArduinoJson\\**", 
+                "C:\\Users\\Alex\\Documents\\Arduino\\libraries\\UniversalKeyboardDriver\\**", 
+                "C:\\Users\\Alex\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\2.7.2\\**"
+            ],
+            "forcedInclude": [],
+            "intelliSenseMode": "msvc-x64",
+            "compilerPath": "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.24.28314/bin/Hostx64/x64/cl.exe",
+            "cStandard": "c11",
+            "cppStandard": "c++17"
+        }
+    ],
+    "version": 4
+}
