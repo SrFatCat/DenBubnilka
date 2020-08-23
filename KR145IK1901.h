@@ -26,6 +26,8 @@ class CKR145IK1901 {
 	bool isNeedCorrection = true;
 	bool startProcessCorrection = false;
 
+	void (*gongF)();
+
 	void syncTime();
 
 	void resetMinute() { startProcessCorrection = true;}
@@ -37,6 +39,7 @@ class CKR145IK1901 {
 	bool process();
 
 public:
+	CKR145IK1901(void (*gongF_)() = nullptr) : gongF(gongF_){}
 	void init();
 	void run();
 };

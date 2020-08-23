@@ -50,6 +50,7 @@ bool CKR145IK1901::process(){
 
 void CKR145IK1901::init(){
 	pinMode(pinCorrection, OUTPUT);
+	digitalWrite(pinCorrection, HIGH);
 	pinMode(pinHours, OUTPUT);
 	pinMode(pinMinutes, OUTPUT);
 }
@@ -57,10 +58,11 @@ void CKR145IK1901::init(){
 void CKR145IK1901::run(){
 	if (!process()) {
 		if (WiFi.status() == WL_CONNECTED) {
-			syncTime();
+			CKR145IK1901::syncTime();
 		}
 		if (now() > 1514764800L) {
 			if (isResetClock) {
+				digitalWrite(pinCorrection, LOW);
 				uint32_t newTime = now() + ((hour() + minute()) * MIN_SET_PUSH * 2) / 1000;
 				DEBUG_PRINT("Set time!\n");
 				resetMinute();
@@ -72,6 +74,7 @@ void CKR145IK1901::run(){
 				if (minute() == 0 && second() == 30 && isNeedCorrection) {
 					DEBUG_PRINT("Correction!\n");
 					resetMinute();
+					if (gongF) (*gongF)();
 					isNeedCorrection = false;
 				}
 				if (minute() == 1 && !isNeedCorrection) isNeedCorrection = true;
@@ -89,8 +92,8 @@ void CKR145IK1901::syncTime() {
 	else if (newSyncTime < millis()) {
 		uint32_t tm = sntp_get_current_timestamp();
 		if (tm > 1514764800L) {
-			setTime(tm);
-			DEBUG_PRINT("Timestamp: i Current time: %i.%i.%i %02i:%02i:%02i\n", day(), month(), year(), hour(), minute(), second());
+			setTime(tm + 3 * 3600 );
+			DEBUG_PRINT("Timestamp: %i.%i.%i %02i:%02i:%02i\n", day(), month(), year(), hour(), minute(), second());
 			newSyncTime = millis() + 3600000L;
 		}
 		else {
