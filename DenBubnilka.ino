@@ -356,12 +356,12 @@ void loop(){
 					isErrConfigLoad = !takeHTTPConfig();
 				}
 				if (!isErrConfigLoad) { 
-					if (timeToRestart == 0) playFile("/error.mp3");
 					if (isAlreadyRestart) {
+						playFile("/error.mp3");
 						if (isUpshift) nextStation(); else prevStation();
 					}
 					else {
-						if (timeToRestart == 0) timeToRestart = millis() + 3000;
+						if (timeToRestart == 0) timeToRestart = millis() + 2000;
 					}
 				}
 			}
@@ -369,8 +369,9 @@ void loop(){
 	}
 	
 	if (timeToRestart > 0 && timeToRestart < millis()){
-		playFile("/restart.mp3");
-		playStream();
+		//playFile("/restart.mp3");
+		//playStream();
+		playStream(config["Stations"][stationID]["stations"].as<const char*>());
 		isAlreadyRestart = true;
 		timeToRestart = 0;
 	}
