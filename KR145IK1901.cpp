@@ -2,7 +2,7 @@
 // 
 // 
 
-#define _DEBUG
+//#define _DEBUG
 #include "MyArduino.h"
 #include "KR145IK1901.h"
 #include <ESP8266WiFi.h>

@@ -1,13 +1,13 @@
 /**********************************************************************************
- * When in the IDE please select the following options on the ESP8266:
- *
  * 
  * Name:		DenBubnilka.ino
  * Created:	28.05.2019 15:08:49
  * Author:	Alex
- *
+ * 
+ * When in the IDE please select the following options on the ESP8266:
  * Tools->lwIP Variant->v1.4 Open Source, or V2 Higher Bandwidth
  * Tools->CPU Frequency->160MHz
+ * 
 **********************************************************************************/
 
 #include "AudioFileSourceICYStream.h"//ESP8266Audio-master_mod_espmini.zip 
@@ -20,9 +20,9 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define _DEBUG
+//#define _DEBUG
 #define PROJECT "DenBubnilka"
-#define VERSION "1.5"
+#define VERSION "1.6"
 
 #include "MyArduino.h"
 #include "MyWiFi.h"
@@ -33,7 +33,7 @@ enum EKeyCodes { KEY_UP = 5, KEY_DOWN = 0, KEY_SLEEP = 4};
 const int16_t keyCodeArray_d[] = { KEY_UP,  KEY_DOWN, KEY_SLEEP };
 CKeyboardDriver keyDriver(1);
 
-#define PIN_MUTE D6 //GPIO12
+#define PIN_MUTE D0 //GPIO16
 #define DO_MUTE digitalWrite(PIN_MUTE, LOW)
 #define DO_UNMUTE digitalWrite(PIN_MUTE, HIGH)
 
@@ -60,31 +60,42 @@ uint8_t stationCount;
 bool isUpshift = true;
 
 bool goOTA(String httpAnswer){
+	bool ret = true;
 	playFile("/startota.mp3");
 	DynamicJsonDocument configOTA(2048);
+	DEBUG_PRINT("DynamicJsonDocument goOTA \n");
 	DeserializationError error = deserializeJson(configOTA, httpAnswer);
 	if (error) {
 		DEBUG_PRINT("DeserializeJson HTTP OTA request failed:%s!\n", error.c_str());
 		return false;
 	}
-	if (configOTA.containsKey("SPIIFS")){
+#ifdef _DEBUG
+	DEBUG_PRINT("configOTA:\n ");
+	serializeJsonPretty(configOTA, Serial);
+	DEBUG_PRINT("\n");
+#endif
+	if (configOTA.containsKey("SPIFFS")){
 		playFile("/otaspiffs.mp3");
-		if (configOTA["SPIFFS"]["format"]) SPIFFS.format();
-		JsonArray arr = configOTA["SPIIFS"]["files"].as<JsonArray>();
+		if (configOTA["SPIFFS"]["format"].as<int>()) {
+			SPIFFS.format();
+			ret = false;
+		}
+		else DEBUG_PRINT("NO SPIFFS format\n");
+		JsonArray arr = configOTA["SPIFFS"]["files"].as<JsonArray>();
 		for (int i=0; i<arr.size(); i++) {
 			HTTPClient client;
-			String fileUrl = configOTA["SPIIFS"]["url"].as<String>() + arr[i].as<String>();
+			String fileUrl = configOTA["SPIFFS"]["url"].as<String>() + arr[i].as<String>();
 			String fileName = "/" + arr[i].as<String>();
-			DEBUG_PRINT("Download \"%s\" from \"%s\"\n", fileName.c_str(), fileUrl.c_str());
+			DEBUG_PRINT("Download \"%s\" from \"%s\"...", fileName.c_str(), fileUrl.c_str());
 			File f = SPIFFS.open(fileName, "w");
 			if (f) {
 				client.begin(fileUrl);
 				int httpCode = client.GET();
 				if (httpCode == HTTP_CODE_OK){
-					client.writeToStream(&f);
+					if (client.writeToStream(&f) > 0) DEBUG_PRINT("OK\n"); else DEBUG_PRINT("writeToStream error\n"); 
 				}
 				else{				
-					DEBUG_PRINT("GET... OTA SPIFFS failed, error: %s\n", client.errorToString(httpCode).c_str());
+					DEBUG_PRINT("HTTP error: %s\n", client.errorToString(httpCode).c_str());
 				}
 				f.close();
 			}
@@ -94,16 +105,20 @@ bool goOTA(String httpAnswer){
 			client.end();
 		}
 	}
+	DEBUG_PRINT("OTA:\"%s\"\n", configOTA["OTA"].as<const char *>());
 	if (strlen(configOTA["OTA"].as<const char *>()) > 0 ){
 		playFile("/otaprogmem.mp3");
 		runOTA(configOTA["OTA"].as<const char *>());
 	}
-
-	
+	else {
+		DEBUG_PRINT("NO OTA BIN\n");
+	}
+	return ret;	
 }
 
 
 bool loadConfig() {
+	DEBUG_PRINT("START loadConfig\n");
 	bool ret = true;
 	File configFile = SPIFFS.open("/config.json", "r");
 	if (!configFile) return false;
@@ -118,11 +133,15 @@ bool loadConfig() {
 			ret = false;
 		}
 		else{
-			isSleep = config["Sleep"];
-			stationID = config["StationID"];
-			stationCount = config["Size"];
+			if (!config.containsKey("Sleep") || !config.containsKey("StationID") || !config.containsKey("Size") ) {
+				ret = false;
+			}
+			else {
+				isSleep = config["Sleep"];
+				stationID = config["StationID"];
+				stationCount = config["Size"];
+			}
 		}
-		//if (root.containsKey("sleep")) isSleep = root["sleep"]; else isSleep = false;
 	}	
 	configFile.close();
 	return ret;
@@ -157,19 +176,22 @@ bool takeHTTPConfig(){
 	client.begin(httpGet);
 	if (client.GET() > 0) {
 		String httpAnswer = client.getString();
-		if ( httpAnswer.indexOf("OTA=") >= 0 ) {
+		if ( httpAnswer.indexOf("OTA\":") >= 0 ) {
+			DEBUG_PRINT("OTA Detected!\n");
 			result = goOTA(httpAnswer);
-		}
-		DeserializationError error = deserializeJson(config, httpAnswer);
-		if (error) {
-			DEBUG_PRINT("DeserializeJson HTTP request failed:%s!\n", error.c_str());
-		}
-		else{
-			isSleep = config["Sleep"];
-			stationID = config["StationID"];
-			stationCount = config["Size"];
-			saveConfig();
-			result = true;
+		} 
+		else {
+			DeserializationError error = deserializeJson(config, httpAnswer);
+			if (error) {
+				DEBUG_PRINT("DeserializeJson HTTP request failed:%s!\n", error.c_str());
+			}
+			else{
+				isSleep = config["Sleep"];
+				stationID = config["StationID"];
+				stationCount = config["Size"];
+				saveConfig();
+				result = true;
+			}
 		}
 	}
 	else {
@@ -215,7 +237,7 @@ void clearAudioPtr(){
 void playFile(const char *fileName){
 	clearAudioPtr();
 	if (!SPIFFS.exists(fileName)) {
-		DEBUG_PRINT("playFile \"%s\" ERR!", fileName);
+		DEBUG_PRINT("playFile \"%s\" ERR!\n", fileName);
 		return;
 	}
 	file = new AudioFileSourceSPIFFS(fileName);
@@ -253,7 +275,8 @@ void playStream(const char *streamPath){
 }
 
 void playStream(){
-	const char *sID =  config["Stations"][stationID]["ID"];
+	char sID[3]; // = config["Stations"][stationID]["ID"];
+	itoa(stationID + 1, sID, 10);  
 	DEBUG_PRINT("Select channel %i(%s) ==> %s\n", stationID, sID, config["Stations"][stationID]["stations"].as<const char*>());
 	playFile((String("/") + sID + String(".mp3")).c_str());
 	playStream(config["Stations"][stationID]["stations"].as<const char*>());
@@ -310,7 +333,7 @@ void setup(){
 
 	playFile("/start.mp3");
 
-	isErrConfigLoad = (!loadConfig() || !digitalRead(KEY_SLEEP));
+	isErrConfigLoad = (!digitalRead(KEY_SLEEP) || !loadConfig());
 #ifdef _DEBUG
 	if (!isErrConfigLoad) serializeJsonPretty(config, Serial);
 #endif
@@ -372,6 +395,7 @@ void loop(){
 		//playFile("/restart.mp3");
 		//playStream();
 		playStream(config["Stations"][stationID]["stations"].as<const char*>());
+		DEBUG_PRINT(".... restart Stream ....\n");
 		isAlreadyRestart = true;
 		timeToRestart = 0;
 	}
